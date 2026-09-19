@@ -15,6 +15,7 @@
 
 import os
 import re
+import shlex
 import time
 
 from clusterfuzz._internal.metrics import logs
@@ -84,7 +85,7 @@ def get_package_name(apk_path=None):
   # Try retrieving package name using aapt.
   aapt_binary_path = os.path.join(
       environment.get_platform_resources_directory(), 'aapt')
-  aapt_command = '%s dump badging %s' % (aapt_binary_path, apk_path)
+  aapt_command = shlex.join([aapt_binary_path, 'dump', 'badging', apk_path])
   output = adb.execute_command(aapt_command, timeout=AAPT_CMD_TIMEOUT)
   match = re.match('.*package: name=\'([^\']+)\'', output, re.DOTALL)
   if not match:
@@ -118,7 +119,7 @@ def install(package_apk_path: str, **kwargs):
     if not isinstance(value, bool):
       cmd.append(str(value))
 
-  cmd.append(package_apk_path)
+  cmd.append(shlex.quote(package_apk_path))
   return adb.run_command(cmd)
 
 
