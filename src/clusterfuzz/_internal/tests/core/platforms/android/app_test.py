@@ -14,8 +14,12 @@
 """Tests for app functions."""
 
 import os
+import shutil
+import tempfile
 from unittest import mock
 from unittest import TestCase
+
+import parameterized
 
 from clusterfuzz._internal.platforms.android import app
 from clusterfuzz._internal.system import environment
@@ -64,6 +68,87 @@ class GetPackageNameTest(android_helpers.AndroidTest):
     """Test apk path passed as argument."""
     self.assertEqual(
         app.get_package_name(self.test_apk_path), self.test_apk_pkg_name)
+
+
+_FAKE_AAPT = """#!/bin/sh
+printf '%s' "$3" > "$(dirname "$0")/received_path"
+[ "$#" = 3 ] && [ "$1" = dump ] && [ "$2" = badging ] && echo "package: name='com.example'"
+"""
+
+_FAKE_ADB = """#!/bin/sh
+printf '%s' "$#" > "$(dirname "$0")/adb_argc"
+for arg; do last="$arg"; done
+printf '%s' "$last" > "$(dirname "$0")/adb_last_arg"
+echo Success
+"""
+
+_APK_PATH_TEMPLATES = [
+    ('command_substitution', '/x/p$(touch {marker})/a.apk'),
+    ('space', '/x/my dir/a.apk'),
+    ('plain', '/x/a.apk'),
+    ('command_separator', '/x/p;touch {marker};/a.apk'),
+    ('single_quote', "/x/it's/a.apk"),
+]
+
+
+class GetPackageNameAndInstallQuotingTest(TestCase):
+  """Tests that get_package_name and install hand the APK path to aapt and adb
+  as one literal argument, using real bash with fake aapt and adb binaries."""
+
+  def setUp(self):
+    super().setUp()
+    helpers.patch_environ(self)
+    environment.set_value('PKG_NAME', None)
+
+    self.tmp_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+    self.marker = os.path.join(self.tmp_dir, 'marker')
+    self._write_executable('aapt', _FAKE_AAPT)
+    fake_adb = self._write_executable('adb', _FAKE_ADB)
+
+    helpers.patch(self, [
+        'clusterfuzz._internal.system.environment.'
+        'get_platform_resources_directory',
+    ])
+    self.mock.get_platform_resources_directory.return_value = self.tmp_dir
+    environment.set_value('ADB', fake_adb)
+    environment.set_value('ANDROID_SERIAL', 'fake-serial')
+
+  def _write_executable(self, name, content):
+    """Writes an executable script into the temp dir and returns its path."""
+    path = os.path.join(self.tmp_dir, name)
+    with open(path, 'w') as f:
+      f.write(content)
+    os.chmod(path, 0o755)
+    return path
+
+  def _read(self, name):
+    """Returns the content of a file in the temp dir, or None if missing."""
+    path = os.path.join(self.tmp_dir, name)
+    if not os.path.exists(path):
+      return None
+    with open(path) as f:
+      return f.read()
+
+  @parameterized.parameterized.expand(_APK_PATH_TEMPLATES)
+  def test_get_package_name_passes_apk_path_as_one_argument(
+      self, _, apk_path_template):
+    """Tests that aapt receives the APK path unchanged and no shell command in
+    it runs."""
+    apk_path = apk_path_template.format(marker=self.marker)
+    self.assertEqual(app.get_package_name(apk_path), 'com.example')
+    self.assertFalse(os.path.exists(self.marker))
+    self.assertEqual(self._read('received_path'), apk_path)
+
+  @parameterized.parameterized.expand(_APK_PATH_TEMPLATES)
+  def test_install_passes_apk_path_as_one_argument(self, _, apk_path_template):
+    """Tests that adb install receives the APK path unchanged and no shell
+    command in it runs."""
+    apk_path = apk_path_template.format(marker=self.marker)
+    app.install(apk_path)
+    self.assertFalse(os.path.exists(self.marker))
+    self.assertEqual(self._read('adb_argc'), '5')
+    self.assertEqual(self._read('adb_last_arg'), apk_path)
 
 
 class InstallTest(TestCase):
